@@ -3,7 +3,7 @@ from mujoco.glfw import glfw
 import numpy as np
 import os
 
-xml_path = "/home/surya/Desktop/ERL_References/NewSetup/Car_LocoTransformer/Mujoco_learning/Pushr_car_simulation/cars/pusher_car/buddy.xml"
+xml_path = "cars/pusher_car/buddy.xml"
 simend = 50 #simulation time
 print_camera_config = 0 #set to 1 to print camera config
                         #this is useful for initializing view of the model)

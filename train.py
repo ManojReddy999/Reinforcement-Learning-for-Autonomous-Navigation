@@ -38,7 +38,6 @@ if __name__ == '__main__':
         net_arch=[256,256]
     )
 
-
     # model = PPO(
     #     policy='MultiInputPolicy',
     #     n_steps = 2048,

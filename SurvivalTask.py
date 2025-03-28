@@ -4,15 +4,17 @@ from dm_control.composer.observation import observable
 import numpy as np
 from dm_control.utils import transformations
 from dm_control.locomotion.arenas import floors
-
+from car import Car
 from obstacle import Wall_x, Wall_y, Sphere, Cube, Cylinder, Cuboid1, Cuboid2
 
-control_timestep = 0.05
-physics_timestep = 0.005
+DEFAULT_CONTROL_TIMESTEP = 0.05
+DEFAULT_PHYSICS_TIMESTEP = 0.005
 
 class Survive(composer.Task):
 
-  def __init__(self, agent, num_obstacles, arena_size = 25):
+  def __init__(self, agent=Car(), num_obstacles=100, arena_size=10, control_timestep=DEFAULT_CONTROL_TIMESTEP, physics_timestep=DEFAULT_PHYSICS_TIMESTEP, random_seed=None):
+    super().__init__()
+    np.random.seed(random_seed)
     
     self._agent = agent
     self.arena_size = arena_size
@@ -96,9 +98,5 @@ class Survive(composer.Task):
         self._arena.attach(obs)
         self._obstacles.append(obs)
   
-
   def get_reward(self,physics):
-    if self.detect_collisions(physics):
-        return -1000  # Heavy penalty for collisions
-    else:
-        return 1
+    return self.detect_collisions(physics)

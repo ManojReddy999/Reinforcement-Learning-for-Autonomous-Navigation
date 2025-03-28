@@ -38,7 +38,6 @@ import matplotlib.pyplot as plt
 
 '''
 
-
 class CarEnv(Env):
 
     def __init__(self):
@@ -89,7 +88,7 @@ class CarEnv(Env):
         self.boxPos = np.array(self.task._button_initial_pose[:2])
         self.init_goal = self.boxPos
         self.init_car = [0, 0, 0]
-
+    
         print("Generating environment... Box - ")
 
     def step(self, action):
@@ -129,7 +128,6 @@ class CarEnv(Env):
 
         # alpha = 1
         # beta = 0.05
-
         # reward += alpha * np.exp(-beta * x)
 
         # Reward depending on the yaw angle of the car

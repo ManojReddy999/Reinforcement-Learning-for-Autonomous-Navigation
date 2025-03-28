@@ -2,4 +2,9 @@
 *.npy
 /NewEnv/
 /__pycache__/
-
+NetArch.py
+Eval.py
+ImageEnv.py
+ImageOnlyEnv.py
+main.py
+Mujoco_pusherBasic.py

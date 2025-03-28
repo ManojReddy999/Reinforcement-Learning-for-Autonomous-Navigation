@@ -113,9 +113,6 @@ class DepthMap3DFeatureExtractorWrapper(BaseFeaturesExtractor):
 
 
 
-
-
-
 class Custom3DConvFeatureExtractor(nn.Module):
     def __init__(self, input_channels=1, temporal_depth=6, features_dim=256):
         super(Custom3DConvFeatureExtractor, self).__init__()
@@ -444,3 +441,57 @@ class DepthMapFeatureExtractor(BaseFeaturesExtractor):
         mean = depth_map.mean(dim=[1, 2, 3, 4], keepdim=True)
         std = depth_map.std(dim=[1, 2, 3, 4], keepdim=True) + 1e-6
         return (depth_map - mean) / std
+
+
+class GSageFeatureExtractor(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(GSageFeatureExtractor, self).__init__()
+        # Define GCN layers
+        self.conv1 = SAGEConv(input_dim, hidden_dim)
+        self.conv2 = SAGEConv(hidden_dim, hidden_dim)
+        self.conv3 = SAGEConv(hidden_dim, output_dim)
+
+        # Activation and pooling
+        self.relu = nn.ReLU()
+        self.pool = global_mean_pool
+
+    def forward(self, data):
+
+        # Move batch to same device as the model
+        # device = next(self.parameters()).device
+        # data = data.to(device)
+
+        # 'data' is a pytorch geometric data object with x, edge_index and batch
+        x, edge_index, batch = data.x, data.edge_index, data.batch
+
+        # Pass through the layers
+        x = self.relu(self.conv1(x, edge_index))
+        x = normalize(x, p=2, dim=-1)
+        x = self.relu(self.conv2(x, edge_index))
+        x = normalize(x, p=2, dim=-1)
+        x = self.conv3(x, edge_index)
+        x= normalize(x, p=2, dim=-1)
+
+        # Global pooling to get a fixed size representation
+        x = self.pool(x, batch)
+
+        return x
+    
+class GSageFeatureExtractorWrapper(BaseFeaturesExtractor):
+    def __init__(self, observation_space, input_dim = 3, hidden_dim = 64, output_dim = 128):
+        super(GSageFeatureExtractorWrapper, self).__init__(observation_space, features_dim=output_dim)
+
+        self.feature_extractor = GSageFeatureExtractor(input_dim, hidden_dim, output_dim)
+
+    def forward(self, observations):
+        # convert point cloud to graph
+        batched_data = point_cloud_to_graph(observations['cam'], radius=0.5)
+
+        # del observations["pc"]
+
+        features = self.feature_extractor(batched_data)
+        
+        # del batched_data
+        # torch.cuda.empty_cache()
+
+        return features
