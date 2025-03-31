@@ -177,7 +177,6 @@ class PointGNNFeatureExtractorWrapper(BaseFeaturesExtractor):
         # convert point cloud to graph
 
         edge_index, vertex_features, batch = point_cloud_to_graph(observations['cam'], method='knn', k=4, normalize=False)
-
         cam_features = self.feature_extractor(edge_index, vertex_features, batch)
 
         # Process the vector observations

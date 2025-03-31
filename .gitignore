@@ -8,3 +8,5 @@ ImageEnv.py
 ImageOnlyEnv.py
 main.py
 Mujoco_pusherBasic.py
+composer.ipynb
+train_GNN.py

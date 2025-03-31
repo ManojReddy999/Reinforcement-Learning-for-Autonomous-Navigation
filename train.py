@@ -1,81 +1,69 @@
 import os
 import argparse
 import time
-
 from stable_baselines3 import SAC, PPO
-# from sbx import SAC
-
 from stable_baselines3.common.vec_env import VecFrameStack
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnRewardThreshold, CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, SubprocVecEnv
 import torch.optim as optim
+from env import CarEnv
+from feature_extractors import PointGNNFeatureExtractorWrapper, CNNFeatureExtractor
+import yaml
 
-from ImageEnv import CarEnv
-from NetArch import DepthMapFeatureExtractor, CustomFeaturesExtractor, CustomMultiInputExtractor
+def load_yaml(config_path):
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+    
+config = load_yaml("config/sac_point_cloud_reverse.yaml")
+training_params = config.get("training",{})
+model_params = config.get("model", {})
+model_inputs = training_params['model_inputs']
 
-def make_env(rank):
+def make_env(rank,arena_size=10, model_inputs=CarEnv.ALL_MODEL_INPUTS):
     def _init():
+        env = CarEnv(arena_size=arena_size, model_inputs=model_inputs)
         # print(f"Initializing environment {rank} in process {os.getpid()}")
-        return CarEnv()
+        return env
     return _init
 
 if __name__ == '__main__':
     
-    tb = os.path.join("/home/mmkr/LocoTransformer_v2/Pushr_car_simulation/results/tensor","SAC_2DCNN_300k")
-    models = os.path.join("/home/mmkr/LocoTransformer_v2/Pushr_car_simulation/results/models","SAC_2DCNN_300k")
-    stats_path = os.path.join("/home/mmkr/LocoTransformer_v2/Pushr_car_simulation/results/logs","SAC_2DCNN_300k")
+    tb = os.path.join("results/tensor","SAC_GNN_100k")
+    models = os.path.join("results/models","SAC_GNN_100k")
+    stats_path = os.path.join("results/logs","SAC_GNN_100k")
 
-    num_envs = 8
+    num_envs = training_params['num_envs']
     env = SubprocVecEnv([make_env(i) for i in range(num_envs)])
-    # env = DummyVecEnv([make_env(i) for i in range(num_envs)])
     env = VecNormalize(env, norm_obs=False, norm_reward=True)
 
-    policy_kwargs = dict(
-        features_extractor_class=CustomMultiInputExtractor,
-        features_extractor_kwargs=dict(features_dim=256),
-        net_arch=[256,256]
-    )
-
-    # model = PPO(
-    #     policy='MultiInputPolicy',
-    #     n_steps = 2048,
-    #     learning_rate=3e-4,
-    #     n_epochs=10,
-    #     env=env,
-    #     batch_size=16,
-    #     clip_range=0.2,
-    #     ent_coef=0.01,
-    #     vf_coef=0.5,
-    #     verbose=1,
-    #     tensorboard_log=tb,
-    #     seed=1,
-    #     policy_kwargs=policy_kwargs
-    # )
-
+    if "point_cloud" in model_inputs:
+        policy_kwargs = dict(
+            features_extractor_class=PointGNNFeatureExtractorWrapper,
+            features_extractor_kwargs=dict(input_dim=3,hidden_dim=32,output_dim=256,num_layers=3,use_edgeconv=False),
+            net_arch=[256,256]
+        )
+    elif "depth" in model_inputs:
+        policy_kwargs = dict(
+            features_extractor_class=CNNFeatureExtractor,
+            features_extractor_kwargs=dict(features_dim=128),
+            net_arch=[256,256]
+        )
 
     model = SAC(
-        policy='MultiInputPolicy',
+        **model_params,
         env=env,
-        learning_rate=3e-4,
-        batch_size=256,
-        buffer_size=100000,
-        learning_starts=1000,
-        tensorboard_log=tb,
         policy_kwargs=policy_kwargs,
-        verbose=1
+        tensorboard_log=tb
     )
-
 
     # saved_model_path='/home/mmkr/LocoTransformer_v2/Pushr_car_simulation/results/models/PPO_GS_100k_32_128'
     # model=PPO.load(saved_model_path, env=env)
     # model.policy.half()
 
     # with torch.amp.autocast(device_type="cuda"):
-    model.learn(total_timesteps=300000)
+    model.learn(total_timesteps=training_params['total_timesteps'])
     env.save(stats_path+'test'+".pkl")
     print("Saving end model")
     model.save(models)
-
-    # model.policy

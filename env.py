@@ -2,9 +2,8 @@ import numpy as np
 import math
 from gymnasium import Env
 from gymnasium.spaces import Box, Dict
-
 from dm_control import composer
-from SurvivalTask import Survive
+from task import Survive
 import cv2
 import matplotlib.pyplot as plt
 import open3d as o3d
@@ -23,7 +22,7 @@ class CarEnv(Env):
     def __init__(self, num_obstacles=120, arena_size=8, model_inputs=ALL_MODEL_INPUTS, random_seed=None):
 
         self.model_inputs = model_inputs
-        self.task = Survive(num_obstacles,arena_size, random_seed)
+        self.task = Survive(num_obstacles=num_obstacles, arena_size=arena_size, random_seed=random_seed)
         self.original_env = composer.Environment(self.task, raise_exception_on_physics_error=False, strip_singleton_obs_buffer_dim=True)
         self.mj_state = self.original_env.reset()
         self.timeElapsed = 0
@@ -45,7 +44,7 @@ class CarEnv(Env):
             vec_space_low += [MIN_THROTTLE, MIN_THROTTLE]
             vec_space_high += [MAX_THROTTLE, MAX_THROTTLE]
 
-        vec_space = Box(low = vec_space_low, high = vec_space_high, dtype=np.float32) if len(vec_space_low) > 0 else None
+        vec_space = Box(low = np.array(vec_space_low), high = np.array(vec_space_high), dtype=np.float32) if len(vec_space_low) > 0 else None
 
         if "depth" in self.model_inputs:
             shape = self.mj_state.observation['car/realsense_camera'].shape
@@ -65,7 +64,7 @@ class CarEnv(Env):
         self.dist = 0 
         self.direction = 0
         self.done = False
-        self.init_car = self.creature.get_pose(self.original_env.physics)[0]
+        self.init_car = self.task._agent.get_pose(self.original_env.physics)[0]
         self.last_pos = self.init_car
    
     def step(self, action):
@@ -153,7 +152,7 @@ class CarEnv(Env):
     def checkComplete(self):
         
         if self.timeElapsed >= HORIZON: return 1
-        if not self.task.detect_collisions(self.original_env.physics): return 3
+        if self.task.detect_collisions(self.original_env.physics): return 3
         return 0
 
     def reset(self,seed=None,options=None):
