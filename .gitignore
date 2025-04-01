@@ -10,3 +10,7 @@ main.py
 Mujoco_pusherBasic.py
 composer.ipynb
 train_GNN.py
+Button.py
+ButtonEnv.py
+ButtonTask.py
+Goal_Button.py
