@@ -1,0 +1,12 @@
+setuptools==72.1.0
+stable-baselines3==2.3.2
+# gymnasium==0.29.1 - Stable_baselines3 will install gymnasium and torch as they are required packages
+# torch==2.3.1
+numpy
+opencv-python
+tensorboardX
+tensorboard
+# mujoco==3.2.0 - dm_control will install mujoco as it is a required package
+dm_control==1.0.22
+dm_robotics-transformations==0.8.1
+quaternion
