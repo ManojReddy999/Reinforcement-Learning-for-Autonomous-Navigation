@@ -15,11 +15,6 @@ import yaml
 def load_yaml(config_path):
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
-    
-config = load_yaml("config/sac_point_cloud_reverse.yaml")
-training_params = config.get("training",{})
-model_params = config.get("model", {})
-model_inputs = training_params['model_inputs']
 
 def make_env(rank,arena_size=10, model_inputs=CarEnv.ALL_MODEL_INPUTS):
     def _init():
@@ -29,41 +24,59 @@ def make_env(rank,arena_size=10, model_inputs=CarEnv.ALL_MODEL_INPUTS):
     return _init
 
 if __name__ == '__main__':
-    
-    tb = os.path.join("results/tensor","SAC_GNN_100k")
-    models = os.path.join("results/models","SAC_GNN_100k")
-    stats_path = os.path.join("results/logs","SAC_GNN_100k")
 
+    parser = argparse.ArgumentParser(description="Train or Evaluate a model")
+    parser.add_argument("--algo", type=str, choices=["PPO", "SAC"], default="SAC", help="Algorithm to use")
+    parser.add_argument("--config_path", type=str, default="config/sac_point_cloud_reverse.yaml", help="Path to the config file")
+    parser.add_argument("--model_path", type=str, default=None, help="Path to the saved model to evaluate or continue training")
+    parser.add_argument("--log_dir", type=str, default="results", help="Directory to save models and logs")
+    parser.add_argument("--file_name", type=str, default="model", help="Name of the saved model file")
+    parser.add_argument("--simulate", action="store_true", help="Simulate and evaluate trained model")
+    args = parser.parse_args()
+    
+    tb_dir = os.path.join(args.log_dir, "tensorboard", args.file_name)
+    models_dir = os.path.join(args.log_dir, "models")
+    logs_dir = os.path.join(args.log_dir, "logs")
+
+    config = load_yaml(args.config_path)
+    training_params = config.get("training",{})
+    model_params = config.get("model", {})
+
+    model_inputs = training_params['model_inputs']
+    algorithm = {"PPO":PPO, "SAC":SAC}[args.algo]
     num_envs = training_params['num_envs']
-    env = SubprocVecEnv([make_env(i) for i in range(num_envs)])
+    
+    env = SubprocVecEnv([make_env(i,model_inputs=model_inputs) for i in range(num_envs)])
     env = VecNormalize(env, norm_obs=False, norm_reward=True)
 
-    if "point_cloud" in model_inputs:
-        policy_kwargs = dict(
-            features_extractor_class=PointGNNFeatureExtractorWrapper,
-            features_extractor_kwargs=dict(input_dim=3,hidden_dim=32,output_dim=256,num_layers=3,use_edgeconv=False),
-            net_arch=[256,256]
-        )
-    elif "depth" in model_inputs:
-        policy_kwargs = dict(
-            features_extractor_class=CNNFeatureExtractor,
-            features_extractor_kwargs=dict(features_dim=128),
-            net_arch=[256,256]
-        )
+    if args.model_path:
+        print("Loading modek from {args.model_path}")
+        model = algorithm.load(args.model_path, env=env)
+    else:
+        print("Creating new model")
+        if "point_cloud" in model_inputs:
+            policy_kwargs = dict(
+                features_extractor_class=PointGNNFeatureExtractorWrapper,
+                features_extractor_kwargs=dict(input_dim=3,hidden_dim=32,output_dim=256,num_layers=3,use_edgeconv=False),
+                net_arch=[256,256]
+            )
+        elif "depth" in model_inputs:
+            policy_kwargs = dict(
+                features_extractor_class=CNNFeatureExtractor,
+                features_extractor_kwargs=dict(features_dim=128),
+                net_arch=[256,256]
+            )
 
-    model = SAC(
-        **model_params,
-        env=env,
-        policy_kwargs=policy_kwargs,
-        tensorboard_log=tb
-    )
-
-    # saved_model_path='/home/mmkr/LocoTransformer_v2/Pushr_car_simulation/results/models/PPO_GS_100k_32_128'
-    # model=PPO.load(saved_model_path, env=env)
-    # model.policy.half()
+        model = algorithm(
+            **model_params,
+            env=env,
+            policy_kwargs=policy_kwargs,
+            tensorboard_log=tb_dir
+        )
 
     # with torch.amp.autocast(device_type="cuda"):
     model.learn(total_timesteps=training_params['total_timesteps'])
-    env.save(stats_path+'test'+".pkl")
-    print("Saving end model")
-    model.save(models)
+    model_save_path = os.path.join(models_dir, f"{args.file_name}.zip")
+    env.save(os.path.join(logs_dir, f"{args.file_name}_vecnormalize.pkl"))
+    model.save(model_save_path)
+    print(f"Model saved to {model_save_path}")

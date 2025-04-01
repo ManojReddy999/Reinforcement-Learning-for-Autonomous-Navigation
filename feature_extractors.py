@@ -157,21 +157,22 @@ class PointGNNFeatureExtractorWrapper(BaseFeaturesExtractor):
         self.feature_extractor = PointGNNFeatureExtractor(input_dim, hidden_dim, output_dim, num_layers,use_edgeconv)
 
         # Define the state processing network (fully connected layers)
-        n_state_inputs = observation_space['vec'].shape[0]
-        self.state_net = nn.Sequential(
-            nn.Linear(n_state_inputs, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-        )
+        if 'vec' in observation_space:
+            n_state_inputs = observation_space['vec'].shape[0]
+            self.state_net = nn.Sequential(
+                nn.Linear(n_state_inputs, 64),
+                nn.ReLU(),
+                nn.Linear(64, 64),
+                nn.ReLU(),
+            )
 
-        # Combine the GNN and state outputs
-        self.combined_fc = nn.Sequential(
-            nn.Linear(output_dim + 64, features_dim),
-            nn.ReLU(),
-            nn.Linear(features_dim, features_dim),
-            nn.ReLU()
-        )
+            # Combine the GNN and state outputs
+            self.combined_fc = nn.Sequential(
+                nn.Linear(output_dim + 64, features_dim),
+                nn.ReLU(),
+                nn.Linear(features_dim, features_dim),
+                nn.ReLU()
+            )
 
     def forward(self, observations):
         # convert point cloud to graph
