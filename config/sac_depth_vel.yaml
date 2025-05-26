@@ -13,8 +13,8 @@ model:
   verbose: 1
 
 training:
-  num_obstacles: 200
-  model_inputs: ["depth", "reverse"] # This should be a non-empty subset of ["velocity", "reverse", "depth/point_cloud"]
+  num_obstacles: 120
+  model_inputs: ["depth", "velocity"] # This should be a non-empty subset of ["velocity", "reverse", "depth/point_cloud"]
   total_timesteps: 100000
-  num_envs: 4
+  num_envs: 8
   device: "cuda" # "cpu" for CPU

@@ -4,179 +4,179 @@ from gymnasium import Env
 from gymnasium.spaces import Box, Dict
 from dm_control import composer
 from task import Survive
-import cv2
-import matplotlib.pyplot as plt
-import open3d as o3d
 
 MIN_STEERING = -0.38
-MAX_STEERING = 0.38
+MAX_STEERING =  0.38
 MIN_THROTTLE = -1.0
 MIN_FORWARD_THROTTLE = 0
-MAX_THROTTLE = 3.0
-HORIZON = 2048
-COLLISION_PENALTY = 1e6
+MAX_THROTTLE =  3.0
+HORIZON = 1000
 
 class CarEnv(Env):
-    ALL_MODEL_INPUTS = ["reverse","velocity","point_cloud"]
+    # Added "history" to the list of possible model inputs
+    ALL_MODEL_INPUTS = ["reverse", "velocity", "depth", "history"]
 
-    def __init__(self, num_obstacles=120, arena_size=8, model_inputs=ALL_MODEL_INPUTS, random_seed=None):
+    def __init__(self, num_obstacles=200, arena_size=8, model_inputs=ALL_MODEL_INPUTS, random_seed=None):
 
         self.model_inputs = model_inputs
         self.task = Survive(num_obstacles=num_obstacles, arena_size=arena_size, random_seed=random_seed)
         self.original_env = composer.Environment(self.task, raise_exception_on_physics_error=False, strip_singleton_obs_buffer_dim=True)
+
+        if "history" in self.model_inputs:
+            self.vel_history = np.zeros((5, 2), dtype=np.float32)
+
         self.mj_state = self.original_env.reset()
         self.timeElapsed = 0
 
+        # ======= ACTION SPACE =======
         if "reverse" in self.model_inputs:
-            self.action_space = Box(low = np.array([MIN_STEERING, MIN_THROTTLE]),     
-                                    high = np.array([MAX_STEERING, MAX_THROTTLE]),
-                                    shape=(2,), dtype=np.float32)
+            # steering in [-0.38, 0.38], throttle in [-1, 3]
+            self.action_space = Box(
+                low=np.array([MIN_STEERING, MIN_THROTTLE], dtype=np.float32),
+                high=np.array([MAX_STEERING, MAX_THROTTLE], dtype=np.float32),
+            )
         else:
-            self.action_space = Box(low = np.array([MIN_STEERING, MIN_FORWARD_THROTTLE]),     
-                                    high = np.array([MAX_STEERING, MAX_THROTTLE]),
-                                    shape=(2,), dtype=np.float32)
+            # No reverse => throttle in [0, 3]
+            self.action_space = Box(
+                low=np.array([MIN_STEERING, MIN_FORWARD_THROTTLE], dtype=np.float32),
+                high=np.array([MAX_STEERING, MAX_THROTTLE], dtype=np.float32),
+            )
 
-        # Define Observation Space
-        vec_space_low = []
-        vec_space_high = []
+        # ======= OBSERVATION SPACE =======
+        # We'll build vector space (velocity) and camera space depending on inputs
+        vec_space = None
+        spaces_dict = {}
 
+        # Velocity space
         if "velocity" in self.model_inputs:
-            vec_space_low += [MIN_THROTTLE, MIN_THROTTLE]
-            vec_space_high += [MAX_THROTTLE, MAX_THROTTLE]
+            if "history" in self.model_inputs:
+                # 5 frames of velocity => shape (10,)
+                vec_low  = np.array([MIN_THROTTLE]*10, dtype=np.float32)
+                vec_high = np.array([MAX_THROTTLE]*10, dtype=np.float32)
+            else:
+                # Single-step velocity => shape (2,)
+                vec_low  = np.array([MIN_THROTTLE, MIN_THROTTLE], dtype=np.float32)
+                vec_high = np.array([MAX_THROTTLE, MAX_THROTTLE], dtype=np.float32)
+            vec_space = Box(low=vec_low, high=vec_high, dtype=np.float32)
+            spaces_dict["vec"] = vec_space
 
-        vec_space = Box(low = np.array(vec_space_low), high = np.array(vec_space_high), dtype=np.float32) if len(vec_space_low) > 0 else None
-
-        if "depth" in self.model_inputs:
-            shape = self.mj_state.observation['car/realsense_camera'].shape
-        elif "point_cloud" in self.model_inputs:
+        # Camera or point cloud shape
+        cam_space = None
+        if "point_cloud" in self.model_inputs:
             shape = self.mj_state.observation['car/compute_point_cloud'].shape
+            cam_space = Box(low=0, high=np.inf, shape=shape, dtype=np.float32)
+            spaces_dict["cam"] = cam_space
+        elif "depth" in self.model_inputs:
+            # Not requested, but typical usage if you also had "depth"
+            shape = self.mj_state.observation['car/realsense_camera'].shape
+            cam_space = Box(low=0, high=np.inf, shape=shape, dtype=np.float32)
+            spaces_dict["cam"] = cam_space
 
-        cam_space = Box(low = 0, high = np.inf, shape = shape, dtype=np.float32) if shape is not None else None
+        self.observation_space = Dict(spaces_dict)
 
-        spaces = {}
-        if vec_space is not None:
-            spaces["vec"] = vec_space
-        if cam_space is not None:
-            spaces["cam"] = cam_space
-
-        self.observation_space = Dict(spaces)
-        
-        self.dist = 0 
+        # Some internal bookkeeping
+        self.dist = 0.0
         self.direction = 0
         self.done = False
-        self.init_car = self.task._agent.get_pose(self.original_env.physics)[0]
-        self.last_pos = self.init_car
-   
+        self.init_car = self.task._car.get_pose(self.original_env.physics)[0]
+        self.last_pos = self.init_car[:2]
+        self.rewardAccumulated = 0.0
+
     def step(self, action):
-        self.task._agent.apply_action(self.original_env.physics, action, None)
+        # Apply action to the agent
+        # self.task._car.apply_action(self.original_env.physics, action, None)
+        # Step the environment
         self.mj_state = self.original_env.step(action)
         self.timeElapsed += 1
-        check = self.checkComplete()
-        reward = self.getReward()
 
-        if check == 1 or check == 3:
-            self.done = True
-        
-        state_obs = self.get_observations()
+        # Possibly update velocity history if using "history"
+        # if "history" in self.model_inputs and "velocity" in self.model_inputs:
+        #     current_vel = self.mj_state.observation['car/body_vel_2d']
+        #     # Shift everything up by one step
+        #     self.vel_history[:-1] = self.vel_history[1:]
+        #     self.vel_history[-1]  = current_vel
+
+        reward = self.mj_state.reward
+        collision = self.task.detect_collisions(self.original_env.physics)
+        check = self.checkComplete(collision)
+        # if check == 1:
+        #     truncated = True
+        # elif check == 3:
+        #     self.done = True
+        terminated = collision
+        truncated = self.timeElapsed >= HORIZON
+
+        obs = self.get_observations()
         self.update_dist()
         info = {}
 
         self.rewardAccumulated += reward
-
-        if self.done:
+        if terminated or truncated:
             print(self.timeElapsed, "steps")
-            print(check, "Check")
-            print(self.rewardAccumulated)
+            print("Check:", check)
+            print("Total reward:", self.rewardAccumulated)
 
-        truncated = False 
+        return obs, reward, terminated, truncated, info
 
-        return state_obs, reward, self.done, truncated, info
-    
-    def getReward(self):
-
-        wheel_speeds = self.mj_state.observation['car/wheel_speeds']
-        Speed = np.linalg.norm(self.mj_state.observation['car/body_vel_2d'])
-        curr_direction = 0
-
-        if wheel_speeds[2]<0:
-            curr_direction -= 1
-            reward = -1*np.exp(5*Speed)
-        elif wheel_speeds[2]>0:
-            reward = np.exp(10*Speed)
-            curr_direction += 1
-        else:
-            reward = -10
-
-        # Apply penalty only when switching between forward & reverse
-        # if curr_direction*self.direction<0:
-        #     reward -= 0.5  # penalty for switching direction
-        # self.direction = curr_direction
-
-        if self.obstructed():
-            reward -= COLLISION_PENALTY
-
-        return reward
-    
     def get_observations(self):
-
-        combined_obs = {}
+        """Assemble the observation dict based on model_inputs."""
+        obs = {}
 
         if "velocity" in self.model_inputs:
-            vec_obs = self.mj_state.observation['car/body_vel_2d']
-            combined_obs["vec"] = vec_obs
+            if "history" in self.model_inputs:
+                # Return velocity history as shape (10,)
+                current_vel = self.mj_state.observation['car/body_vel_2d']
+                # Shift everything up by one step
+                self.vel_history[:-1] = self.vel_history[1:]
+                self.vel_history[-1]  = current_vel
+                obs["vec"] = self.vel_history.flatten()
+                # print(obs["vec"].shape)
+            else:
+                # Single-step velocity as shape (2,)
+                obs["vec"] = self.mj_state.observation['car/body_vel_2d']
+
         if "point_cloud" in self.model_inputs:
-            cam_obs = self.mj_state.observation['car/compute_point_cloud']
-            combined_obs["cam"] = cam_obs
+            obs["cam"] = self.mj_state.observation['car/compute_point_cloud']
         elif "depth" in self.model_inputs:
-            cam_obs = self.mj_state.observation['car/realsense_camera']
-            combined_obs["cam"] = cam_obs
+            obs["cam"] = self.mj_state.observation['car/realsense_camera']
 
-        # pcd = o3d.geometry.PointCloud()
-        # pcd.points = o3d.utility.Vector3dVector(self.pc)
-        # o3d.visualization.draw_geometries([pcd])
-        return combined_obs
-    
+        return obs
+
     def obstructed(self):
-
-        if self.task.detect_collisions(self.original_env.physics):
-            return True
-        return False
+        return self.task.detect_collisions(self.original_env.physics)
 
     def update_dist(self):
-
-        pos = self.mj_state.observation['car/body_pose_2d']
+        pos = self.mj_state.observation['car/body_pose_2d'][:2]
         self.dist += np.linalg.norm(pos - self.last_pos)
         self.last_pos = pos
-        return 
-    
-    def checkComplete(self):
-        
-        if self.timeElapsed >= HORIZON: return 1
-        if self.task.detect_collisions(self.original_env.physics): return 3
+
+    def checkComplete(self, collision):
+        if self.timeElapsed >= HORIZON:
+            return 1
+        if collision:
+            return 3
         return 0
 
-    def reset(self,seed=None,options=None):
-        
-        print("Dist", self.dist)
-
+    def reset(self, seed=None, options=None):
+        print("Dist traveled before reset:", self.dist)
         self.done = False
         self.mj_state = self.original_env.reset()
-        self.rewardAccumulated = 0
+        self.rewardAccumulated = 0.0
         self.timeElapsed = 0
-        self.dist = 0 
+        self.dist = 0
         self.direction = 0
-        observations = self.get_observations()
+
+        # Reset velocity history if using it
+        if "history" in self.model_inputs and "velocity" in self.model_inputs:
+            current_vel = self.mj_state.observation['car/body_vel_2d']
+            self.vel_history = np.tile(current_vel, (5,1))
+
+        obs = self.get_observations()
         info = {}
-        # print("[RESET] Generating env...")
-        return observations, info
+        return obs, info
 
     def render(self):
-        pass    
+        pass
 
     def close(self):
         self.original_env.close()
-
-
-
-
-

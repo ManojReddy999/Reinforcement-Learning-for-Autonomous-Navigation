@@ -1,8 +1,8 @@
 model:
   policy: "MultiInputPolicy"
-  batch_size: 16
+  batch_size: 64
   learning_rate: 0.0003
-  buffer_size: 100000
+  buffer_size: 1000000
   learning_starts: 1000
   train_freq: 1
   gradient_steps: 1
@@ -13,8 +13,8 @@ model:
   verbose: 1
 
 training:
-  num_obstacles: 200
+  num_obstacles: 100
   model_inputs: ["point_cloud", "reverse"] # This should be a non-empty subset of ["velocity", "reverse", "depth/point_cloud"]
-  total_timesteps: 100000
-  num_envs: 2
+  total_timesteps: 400000
+  num_envs: 8
   device: "cuda" # "cpu" for CPU

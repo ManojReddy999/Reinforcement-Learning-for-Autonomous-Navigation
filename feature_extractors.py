@@ -10,7 +10,6 @@ from torch_scatter import scatter_max, scatter_mean, scatter_add, scatter_min
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 import open3d as o3d
 
-
 def point_cloud_to_graph(point_clouds, method="knn", k=32, radius=1.5, z_min=0, z_max=20.0, normalize=False):
     """
     Converts a batch of point clouds (batch, N, 3) into a graph representation.
@@ -242,7 +241,7 @@ class CNNFeatureExtractor(BaseFeaturesExtractor):
             nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(32), 
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.MaxPool2d(2),
 
             # Second block of Convolution
             nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
@@ -265,6 +264,10 @@ class CNNFeatureExtractor(BaseFeaturesExtractor):
             # nn.AdaptiveAvgPool2d(1),  # Global average pooling layer
             nn.Flatten()
         )
+
+        # self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        # self.min_pool = lambda x: -torch.nn.functional.adaptive_max_pool2d(-x, 1)  # Global min pooling layer
+        # pooled_channels = 128*2
         
         # Compute the size of the CNN output
         with torch.no_grad():
@@ -275,20 +278,26 @@ class CNNFeatureExtractor(BaseFeaturesExtractor):
             sample_depth = sample_depth.unsqueeze(1)
             cnn_output_size = self.cnn(sample_depth).shape[1]
         
+        vec_feature_size = 0
         # Define the state processing network (fully connected layers)
-        n_state_inputs = observation_space['vec'].shape[0]
-        self.state_net = nn.Sequential(
-            nn.Linear(n_state_inputs, 64),
-            nn.ReLU(),
-            # nn.Dropout(0.3),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            # nn.Dropout(0.3)
-        )
+        if 'vec' in observation_space.keys():
+        # print("creating state_net")
+            n_state_inputs = observation_space['vec'].shape[0]
+            self.state_net = nn.Sequential(
+                nn.Linear(n_state_inputs, 64),
+                nn.ReLU(),
+                # nn.Dropout(0.3),
+                nn.Linear(64, 64),
+                nn.ReLU(),
+                # nn.Dropout(0.3)
+            )
+            vec_feature_size += 64
         
         # Combine the CNN and state outputs
+        combined_input = cnn_output_size + vec_feature_size
+        # combined_input = pooled_channels + vec_feature_size
         self.combined_fc = nn.Sequential(
-            nn.Linear(cnn_output_size + 64, features_dim),
+            nn.Linear(combined_input, features_dim),
             nn.ReLU()
             # nn.Linear(features_dim, features_dim),
             # nn.ReLU()
@@ -300,19 +309,240 @@ class CNNFeatureExtractor(BaseFeaturesExtractor):
         depth_map = observations['cam'][:, :, :, 0]
         depth_map = self.normalize_depth_map(depth_map)
         depth_map = depth_map.unsqueeze(1)
-        image_features = self.cnn(depth_map)
+        features = self.cnn(depth_map)
+
+        # global avg & min pool
+        # avg = self.avg_pool(features).view(features.size(0), -1)
+        # min_ = self.min_pool(features).view(features.size(0), -1)
+        # features = torch.cat([avg, min_], dim=1)
         
         # Process the vector observations
-        vector_features = self.state_net(observations['vec'])
-        # vector_features = observations['vec']
-        
+        if "vec" in observations:
+            vector_features = self.state_net(observations['vec'])
         # Concatenate both feature outputs
-        combined_features = torch.cat((image_features, vector_features), dim=1)
-        
+            features = torch.cat((features, vector_features), dim=1)
+   
         # Pass through the final fully connected layer
-        return self.combined_fc(combined_features)
+        return self.combined_fc(features)
     
     def normalize_depth_map(self, depth_map):
         min_val = depth_map.min()
         max_val = depth_map.max()
         return (depth_map - min_val) / (max_val - min_val)
+
+
+
+# --------------------------------------------------------------------------
+# 1) CNN for multi-frame depth
+#    This is a Nature-like CNN adapted for 5 frames of grayscale depth input.
+# --------------------------------------------------------------------------
+class DepthHistoryCNN(nn.Module):
+    """
+    Handles both cases transparently:
+
+      • 1-frame depth  -> input shape  [B, 1, H, W]
+      • 5-frame depth  -> input shape  [B, 5, H, W]
+
+    The number of channels is inferred at run time.
+    """
+    def __init__(self, in_channels: int, base_channels: int = 32):
+        super().__init__()
+        self.net = nn.Sequential(
+            # Conv1
+            nn.Conv2d(in_channels, base_channels, kernel_size=8, stride=4, padding=2),
+            nn.ReLU(),
+            # Conv2
+            nn.Conv2d(base_channels, base_channels*2, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(),
+            # Conv3
+            nn.Conv2d(base_channels*2, base_channels*2, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+        )
+        self.output_channels = base_channels*2
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x is [B, C, H, W] where C == 1 or 5
+        return self.net(x)
+
+
+# --------------------------------------------------------------------------
+# 2) MLP for velocity history
+# --------------------------------------------------------------------------
+class VelocityHistoryMLP(nn.Module):
+    """
+    If you have velocity history of shape (10,) => 5 timesteps × 2 dims each.
+    Produces an embedding of dimension 'token_dim'.
+    """
+    def __init__(self, input_dim, token_dim=64):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, token_dim),
+            nn.ReLU()
+        )
+        self.output_dim = token_dim
+
+    def forward(self, vel_hist):
+        # shape: [B, input_dim]
+        return self.mlp(vel_hist)  # [B, token_dim]
+
+# --------------------------------------------------------------------------
+# 3) The cross-modal Transformer
+#    We'll replicate the idea of LocoTransformer: 
+#     - We produce a single "token" from velocity MLP
+#     - We produce multiple tokens from CNN features 
+#     - Then we run them through a TransformerEncoder
+# --------------------------------------------------------------------------
+class LocoTransformerCore(nn.Module):
+    """
+    A small wrapper that builds a stack of TransformerEncoderLayers
+    to handle (num_tokens, batch, token_dim).
+    """
+    def __init__(self, token_dim=128, n_heads=4, n_layers=2, feedforward_dim=256):
+        super().__init__()
+        # Build a standard PyTorch TransformerEncoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=token_dim,
+            nhead=n_heads,
+            dim_feedforward=feedforward_dim,
+            dropout=0.0,
+            activation='relu',
+            batch_first=False  # we'll pass (seq, batch, dim)
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        self.token_dim = token_dim
+
+    def forward(self, tokens):
+        """
+        tokens shape: [num_tokens, batch_size, token_dim]
+        returns same shape
+        """
+        return self.transformer(tokens)
+
+# --------------------------------------------------------------------------
+# 4) The final Feature Extractor that you register in SB3
+# --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# 3) Feature extractor that now auto-detects 1-frame vs 5-frame depth
+# --------------------------------------------------------------------------
+class HistoryLocoTransformerExtractor(BaseFeaturesExtractor):
+    """
+    Works with either:
+
+      • depth history  (5, 64, 128, 1)   → 5-frame mode
+      • single depth   (64, 128, 1)      → 1-frame mode
+
+    The rest of the API is unchanged.
+    """
+    def __init__(
+        self,
+        observation_space,
+        features_dim: int = 128,
+        token_dim: int = 64,
+        n_heads: int = 1,
+        n_layers: int = 2,
+        feedforward_dim: int = 256,
+        vel_hist_dim: int = 10,
+        base_channels: int = 32,
+    ):
+        super().__init__(observation_space, features_dim)
+
+        # ---------- Which modalities are present? ----------
+        self.use_velocity = "vec" in observation_space.spaces
+        self.use_cam      = "cam" in observation_space.spaces
+        # assert self.use_cam, "`cam` entry not found in observation_space"
+
+        cam_shape = observation_space["cam"].shape   # (… , 1)
+        #   • single-frame: (H, W, 1)           len == 3
+        #   • 5-history  : (5, H, W, 1)        len == 4
+        self.n_frames = cam_shape[0] if len(cam_shape) == 4 else 1
+
+        # ---------- Visual pathway ----------
+        self.depth_cnn = DepthHistoryCNN(in_channels=self.n_frames, base_channels=base_channels)
+        self.up_conv = nn.Conv2d(
+            in_channels=self.depth_cnn.output_channels,
+            out_channels=token_dim,
+            kernel_size=1,
+        )
+
+        # ---------- Velocity pathway ----------
+        if self.use_velocity:
+            vel_dim = observation_space["vec"].shape[0] 
+            self.vel_mlp = VelocityHistoryMLP(
+                input_dim=vel_dim,
+                token_dim=token_dim,
+            )
+
+        # ---------- Cross-modal transformer ----------
+        self.xform = LocoTransformerCore(
+            token_dim=token_dim,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            feedforward_dim=feedforward_dim,
+        )
+
+        # ---------- Final head ----------
+        pooled_dim = token_dim * (2 if self.use_velocity else 1)
+        self.final_head = nn.Sequential(
+            nn.Linear(pooled_dim, features_dim),
+            nn.ReLU(),
+        )
+
+    # ------------------------------------------------------------------
+    # forward()
+    # ------------------------------------------------------------------
+    def forward(self, observations):
+        cam_raw = observations["cam"]                      # [B, …, 1]
+
+        # Re-arrange to [B, C, H, W]  where C = 1 | 5
+        if self.n_frames == 1:
+            # cam_raw = [B, H, W, 1]  → [B, 1, H, W]
+            cam_input = cam_raw.squeeze(-1).unsqueeze(1)
+        else:
+            # cam_raw = [B, 5, H, W, 1] → [B, 5, H, W]
+            cam_input = cam_raw.squeeze(-1)
+
+        cam_input = self._normalize_depth(cam_input)
+        feats     = self.depth_cnn(cam_input)              # [B, C’, h’, w’]
+        tokens_2d = self.up_conv(feats)                    # [B, T, h’, w’]
+
+        # Flatten spatial dims -> [Npatch, B, token_dim]
+        B, T, h, w = tokens_2d.shape
+        vis_tokens = tokens_2d.view(B, T, h * w).permute(2, 0, 1).contiguous()
+
+        # Velocity token (optional) -> [1, B, token_dim]
+        if self.use_velocity:
+            vel_token = self.vel_mlp(observations["vec"].float()).unsqueeze(0)
+            all_tokens = torch.cat([vel_token, vis_tokens], dim=0)
+        else:
+            all_tokens = vis_tokens
+
+        # Cross-modal transformer
+        out_tokens = self.xform(all_tokens)                # same shape
+
+        # Pool
+        if self.use_velocity:
+            pooled = torch.cat(
+                [out_tokens[0],                    # velocity
+                 out_tokens[1:].mean(dim=0)],      # mean of visuals
+                dim=-1,
+            )
+        else:
+            pooled = out_tokens.mean(dim=0)               # [B, token_dim]
+
+        return self.final_head(pooled)                    # [B, features_dim]
+
+    # ------------------------------------------------------------------
+    # utilities
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_depth(depth_map: torch.Tensor) -> torch.Tensor:
+        """
+        Min–max normalise **per frame** (handles 1- or 5-frame inputs).
+        depth_map: [B, C, H, W]
+        """
+        min_val = depth_map.amin(dim=(2, 3), keepdim=True)
+        max_val = depth_map.amax(dim=(2, 3), keepdim=True)
+        return (depth_map - min_val) / (max_val - min_val + 1e-6)
+

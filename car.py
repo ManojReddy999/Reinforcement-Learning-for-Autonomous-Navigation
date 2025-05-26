@@ -16,8 +16,8 @@ class CarObservables(composer.Observables):
 
     @composer.observable
     def realsense_camera(self):
-        return observable.MJCFCamera(self._entity._mjcf_root.find('camera', 'buddy_realsense_d435i'), height=64, width=128, buffer_size=1, depth=True)
-    
+        return observable.MJCFCamera(self._entity._mjcf_root.find('camera', 'buddy_realsense_d435i'), height=64, width=128, buffer_size=5, depth=True)
+ 
     @composer.observable
     def compute_point_cloud(self):
         def get_point_cloud(physics):
@@ -148,16 +148,17 @@ class CarObservables(composer.Observables):
     @property
     def all_observables(self):
         return [
-            self.body_position,
-            self.body_rotation,
-            self.body_rotation_matrix,
+            # self.body_position,
+            # self.body_rotation,
+            # self.body_rotation_matrix,
             self.body_pose_2d,
             self.body_vel_2d,
             self.wheel_speeds,
             self.realsense_camera,
-            self.steering_pos,
-            self.steering_vel,
-        ] + self.kinematic_sensors
+            # self.compute_point_cloud,
+            # self.steering_pos,
+            # self.steering_vel,
+        ] # + self.kinematic_sensors
 
 
 class Car(composer.Robot):
@@ -181,10 +182,10 @@ class Car(composer.Robot):
         """Apply action to car's actuators. 
         `action` is expected to be a numpy array with [steering, throttle].
         """
-        # steering, throttle = action
-        # physics.bind(self.mjcf_model.find('actuator', 'buddy_steering_pos')).ctrl = steering
-        # physics.bind(self.mjcf_model.find('actuator', 'buddy_throttle_velocity')).ctrl = throttle
-        physics.bind(self.actuators).ctrl = action
+        steering, throttle = action
+        physics.bind(self.mjcf_model.find('actuator', 'buddy_steering_pos')).ctrl = steering
+        physics.bind(self.mjcf_model.find('actuator', 'buddy_throttle_velocity')).ctrl = throttle
+        # physics.bind(self.actuators).ctrl = action
 
     def _build_observables(self):
         return CarObservables(self)

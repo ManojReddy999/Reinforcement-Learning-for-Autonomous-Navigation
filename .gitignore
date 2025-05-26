@@ -14,3 +14,7 @@ Button.py
 ButtonEnv.py
 ButtonTask.py
 Goal_Button.py
+/feature_extractors/
+/LocoTransformer_extractor/
+/my_experiment/
+2485_learning_vision_guided_quadrup.pdf
