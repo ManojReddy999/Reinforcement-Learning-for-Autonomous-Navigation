@@ -42,7 +42,7 @@ class EpisodeEvaluator:
         self.distance_list.append(np.linalg.norm(np.copy(self.position_list[-1]) - np.copy(self.position_list[-2])))
         self.time += 1
         
-        if self._env.task.collided:
+        if self._env.task.detect_collisions(self._env.original_env.physics):
             self.collision_list.append(True)
             # reset the collision flag
             self._env.task.collided = False
@@ -137,10 +137,11 @@ class Evaluator:
             
     def step(self,timestep):
         self.episode_evaluator.record(timestep)
-        if self._env.task.timesteps == self.time_limit or self.check_static():    
-            print(f"Episode {self.current_episode} finished at time {self._env.task.timesteps}")
-            self._env.task.initialize_episode(self._env.physics,np.zeros(3))
+        if self.episode_evaluator.time == self.time_limit or self.check_static():    
+            print(f"Episode {self.current_episode} finished at time {self.episode_evaluator.time}")
+            self._env.task.initialize_episode(self._env.original_env.physics,np.zeros(3))
             self._data.append(self.episode_evaluator.get_summary_data())
+            self._env.reset()
             self.reinitialize()
 
     def check_finish(self):
@@ -148,6 +149,7 @@ class Evaluator:
             check if the episode has reached its limit
         """
         if self.current_episode == self.episodes:
+            print(self.current_episode, self.episodes)
             print("Evaluation for environment finished")   
             return True
         return False

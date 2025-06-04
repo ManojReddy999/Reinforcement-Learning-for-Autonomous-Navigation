@@ -156,7 +156,7 @@ class PointGNNFeatureExtractorWrapper(BaseFeaturesExtractor):
         self.feature_extractor = PointGNNFeatureExtractor(input_dim, hidden_dim, output_dim, num_layers,use_edgeconv)
 
         # Define the state processing network (fully connected layers)
-        if 'vec' in observation_space:
+        if 'vec' in observation_space.keys():
             n_state_inputs = observation_space['vec'].shape[0]
             self.state_net = nn.Sequential(
                 nn.Linear(n_state_inputs, 64),
@@ -440,7 +440,7 @@ class HistoryLocoTransformerExtractor(BaseFeaturesExtractor):
         observation_space,
         features_dim: int = 128,
         token_dim: int = 64,
-        n_heads: int = 1,
+        n_heads: int = 4,
         n_layers: int = 2,
         feedforward_dim: int = 256,
         vel_hist_dim: int = 10,
@@ -486,6 +486,8 @@ class HistoryLocoTransformerExtractor(BaseFeaturesExtractor):
         pooled_dim = token_dim * (2 if self.use_velocity else 1)
         self.final_head = nn.Sequential(
             nn.Linear(pooled_dim, features_dim),
+            nn.ReLU(),
+            nn.Linear(features_dim, features_dim),
             nn.ReLU(),
         )
 

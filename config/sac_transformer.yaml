@@ -1,8 +1,8 @@
 model:
   policy: "MultiInputPolicy"
-  batch_size: 64
+  batch_size: 256
   learning_rate: 0.0003
-  buffer_size: 1000000
+  buffer_size: 10000
   learning_starts: 1000
   train_freq: 1
   gradient_steps: 1
@@ -14,7 +14,7 @@ model:
 
 training:
   num_obstacles: 150
-  model_inputs: ["depth", "velocity"] # This should be a non-empty subset of ["velocity", "reverse", "depth/point_cloud"]
+  model_inputs: ["depth","history","velocity"] # This should be a non-empty subset of ["pose", "velocity", "steering", "depth"]
   total_timesteps: 100000
-  num_envs: 8
-  device: "cuda" # "cpu" for CPU
+  num_envs: 1
+  device: "cuda" # Change to "cuda" for Nvidia or "cpu" for CPU

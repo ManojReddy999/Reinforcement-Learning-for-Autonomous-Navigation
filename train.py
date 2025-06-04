@@ -14,6 +14,8 @@ from feature_extractors import PointGNNFeatureExtractorWrapper, CNNFeatureExtrac
 import yaml
 import numpy as np
 import pandas as pd
+from evaluation import Evaluator
+import re
 
 def load_yaml(config_path):
     with open(config_path, 'r') as f:
@@ -29,69 +31,61 @@ def make_env(rank, num_obstacles, model_inputs=CarEnv.ALL_MODEL_INPUTS):
         return Monitor(env)
     return _init
 
-def evaluate(model, env, model_inputs, num_obstacles, sheet_name: str, n_episodes: int, xlsx_path: str):
-    # env = DummyVecEnv([make_env(0, num_obstacles, model_inputs)])
-    raw_env: CarEnv = env.envs[0]
+def policy(timestep, model, model_inputs, evaluator):
+    """
+    Convert a dm_control TimeStep to the observation dict expected by the
+    SB3 policy, then return the deterministic action.
 
-    rows = []
-    for ep in range(1, n_episodes + 1):
-        obs = env.reset()
-        done = False
-        step_cnt, speed_sum, top_speed = 0, 0.0, 0.0
+    Parameters
+    ----------
+    timestep : dm_env.TimeStep
+    model    : stable_baselines3 BaseAlgorithm (SAC, PPO, …)
+    model_inputs : list[str]
+        The same subset of ["velocity", "history", "depth", "point_cloud"]
+        that you trained the model with.
 
-        while not done:
-            action, _ = model.predict(obs, deterministic=True)
-            obs, rewards, done, info = env.step(action)
-            reward = float(rewards[0])
-            done = bool(done[0])
-            speed = np.linalg.norm(raw_env.mj_state.observation["car/body_vel_2d"])
-            speed_sum += speed
-            top_speed = max(top_speed, speed)
-            step_cnt += 1
+    Returns
+    -------
+    np.ndarray  (action vector)
+    """
+    # --------------------------------------------------
+    # 1. Build the observation dict
+    # --------------------------------------------------
+    obs = {}
 
-        collision = int(raw_env.obstructed())
-        rows.append(
-            {
-                "episode": ep,
-                "episode_length": step_cnt,
-                "collision": collision,
-                "distance": raw_env.dist,
-                "avg_speed": speed_sum / step_cnt if step_cnt else 0.0,
-                "top_speed": top_speed,
-                "reward": raw_env.rewardAccumulated,
-            }
-        )
-        print(
-            f"[Eval] {sheet_name}  Ep {ep}/{n_episodes}  "
-            f"len={step_cnt}  coll={collision}  dist={raw_env.dist:.2f}  "
-            f"avg_spd={speed_sum/step_cnt:.2f}  top_spd={top_speed:.2f}  "
-            f"R={raw_env.rewardAccumulated:.1f}"
-        )
+    # ----- velocity branch ------------------------------------------
+    if "velocity" in model_inputs:
+        cur_vel = timestep.observation['car/body_vel_2d'].astype(np.float32)
 
-    # aggregate row
-    agg = {
-        "episode": "mean",
-        "episode_length": np.mean([r["episode_length"] for r in rows]),
-        "collision": np.mean([r["collision"] for r in rows]),
-        "distance": np.mean([r["distance"] for r in rows]),
-        "avg_speed": np.mean([r["avg_speed"] for r in rows]),
-        "top_speed": np.mean([r["top_speed"] for r in rows]),
-        "reward": np.mean([r["reward"] for r in rows]),
-    }
-    rows.append(agg)
+        if "history" in model_inputs:
+            # Allocate on first call
+            if not hasattr(policy, "_vel_hist"):
+                policy._vel_hist = np.tile(cur_vel, (5, 1))  # (5, 2)
 
-    df = pd.DataFrame(rows)
+            # FIFO queue: shift ↖ and append newest
+            policy._vel_hist[:-1] = policy._vel_hist[1:]
+            policy._vel_hist[-1]  = cur_vel
+            obs["vec"] = policy._vel_hist.flatten()          # shape (10,)
+        else:
+            obs["vec"] = cur_vel                             # shape (2,)
 
-    # ensure directory
-    os.makedirs(os.path.dirname(xlsx_path), exist_ok=True)
-    if os.path.exists(xlsx_path):
-        with pd.ExcelWriter(xlsx_path, mode="a", engine="openpyxl", if_sheet_exists="replace") as writer:
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-    else:
-        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
+    # ----- visual / geometric branch -------------------------------
+    if "point_cloud" in model_inputs:
+        obs["cam"] = timestep.observation['car/compute_point_cloud'].astype(np.float32)
 
-    print(f"Metrics written to {xlsx_path} → sheet '{sheet_name}'")
+    elif "depth" in model_inputs:
+        depth = timestep.observation['car/realsense_camera'].astype(np.float32)
+        # Optional live preview (comment out if not wanted)
+        # cv2.imshow("Depth", cv2.convertScaleAbs(depth, alpha=0.15))
+        # cv2.waitKey(1)
+        obs["cam"] = depth                                   # shape (H, W, 1)  or (5, H, W, 1)
+
+    evaluator.step(timestep)
+    # --------------------------------------------------
+    # 2. Predict and return the deterministic action
+    # --------------------------------------------------
+    action, _ = model.predict(obs, deterministic=True)
+    return action
 
 
 if __name__ == '__main__':
@@ -102,10 +96,10 @@ if __name__ == '__main__':
     parser.add_argument("--log_dir", type=str, default="results", help="Directory to save models and logs")
     parser.add_argument("--file_name", type=str, default="model", help="Name of the saved model file")
     # evaluation flags
-    parser.add_argument("--eval", action="store_true")
-    parser.add_argument("--eval_episodes", type=int, default=10)
-    parser.add_argument("--xlsx_path", default="results/eval_metrics.xlsx")
-    parser.add_argument("--sheet_name", default=None, help="override sheet name")
+    parser.add_argument("--eval", action="store_true", help='Run in evaluation mode')
+    parser.add_argument('--seed', type=int, help='The random seed used to generate environment', default=0)
+    parser.add_argument('--num_eval_envs', type=int, help='Number of environments to run evaluations in', default=10)
+    parser.add_argument('--num_eval_episodes', type=int, help='Number of episodes to run evaluations for in each environment', default=1)
     parser.add_argument("--simulate", action="store_true", help="Simulate and evaluate trained model")
     args = parser.parse_args()
 
@@ -116,6 +110,10 @@ if __name__ == '__main__':
     algorithm = {"PPO":PPO, "SAC":SAC}[args.algo]
     num_envs = training_params['num_envs']
     num_obstacles = training_params['num_obstacles']
+
+    tb_dir = os.path.join(args.log_dir, "tensorboard", args.file_name)
+    models_dir = os.path.join(args.log_dir, "models")
+    logs_dir = os.path.join(args.log_dir, "logs")
 
     if "point_cloud" in model_inputs:
         print("using GNN")
@@ -128,7 +126,7 @@ if __name__ == '__main__':
         print("using LocoTransformer")
         policy_kwargs = dict(
             features_extractor_class=HistoryLocoTransformerExtractor,
-            features_extractor_kwargs=dict(features_dim=128),
+            features_extractor_kwargs=dict(features_dim=256),
             net_arch=[256,256]
         )
     elif "depth" in model_inputs:
@@ -140,19 +138,33 @@ if __name__ == '__main__':
         )
 
     if args.eval:
-        vec_env = DummyVecEnv([make_env(0, num_obstacles, model_inputs)])
+        model = algorithm.load(args.model_path,custom_objects={'buffer_size': 1})
+        try:
+            summary_prefix = re.findall(r"\/([^\/]+).zip", args.model_path)[0]
+        except:
+            summary_prefix = "CNN_vel"
         print(f"Loading model from '{args.model_path}'")
-        model = algorithm.load(args.model_path, env=vec_env)
-        default_sheet = os.path.splitext(os.path.basename(args.model_path))[0]
-        sheet_name = args.sheet_name or default_sheet
-        evaluate(model,vec_env,model_inputs=model_inputs,num_obstacles=num_obstacles,sheet_name=sheet_name,n_episodes=args.eval_episodes,xlsx_path=args.xlsx_path)
+        evaluator = Evaluator(None, logs_dir, episodes=args.num_eval_episodes, prefix=summary_prefix, time_limit=1000)
+        seedgen = np.random.SeedSequence(entropy=args.seed)
+        seeds = seedgen.generate_state(args.num_eval_envs)
+        for seed in seeds:
+            env = CarEnv(num_obstacles=training_params["num_obstacles"], model_inputs=training_params["model_inputs"], random_seed=int(seed))
+            evaluator.set_environment(env, seed)
+            print(f'Start evaluating in environment with seed {seed}')
+            obs,_ = env.reset()
+            timestep = env.mj_state
+            while not evaluator.check_finish():
+                action = policy(timestep, model, model_inputs=training_params["model_inputs"], evaluator = evaluator)
+                obs, reward, terminated,truncated,_ = env.step(action)
+                timestep = env.mj_state
+                # timestep = original_env.step(action)
+                # if terminated or truncated:
+                #     timestep = env.original_env.reset()
+            
+        evaluator.export_csv()
     else:
         env = SubprocVecEnv([make_env(i, num_obstacles=num_obstacles, model_inputs=model_inputs) for i in range(num_envs)])
         env = VecNormalize(env, norm_obs=False, norm_reward=True)
-
-        tb_dir = os.path.join(args.log_dir, "tensorboard", args.file_name)
-        models_dir = os.path.join(args.log_dir, "models")
-        logs_dir = os.path.join(args.log_dir, "logs")
 
         if args.model_path:
             print(f"Loading model from '{args.model_path}'")

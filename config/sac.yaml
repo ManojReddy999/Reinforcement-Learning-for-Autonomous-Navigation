@@ -14,7 +14,7 @@ model:
 
 training:
   num_obstacles: 150
-  model_inputs: ["depth","history"] # This should be a non-empty subset of ["pose", "velocity", "steering", "depth"]
+  model_inputs: ["depth"] # This should be a non-empty subset of ["pose", "velocity", "steering", "depth"]
   total_timesteps: 100000
   num_envs: 1
   device: "cuda" # Change to "cuda" for Nvidia or "cpu" for CPU
